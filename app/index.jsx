@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
-import { FlatList, Image, ScrollView, Text, TouchableOpacity, View, TextInput, Alert, Linking } from "react-native";
-import { collection, doc, getDocs, serverTimestamp, setDoc, updateDoc, getDoc } from "firebase/firestore"
+import { FlatList, Image, ScrollView, Text, TouchableOpacity, View, TextInput, Alert, Linking, Modal } from "react-native";
+import { collection, doc, getDocs, serverTimestamp, setDoc, updateDoc, getDoc, deleteDoc } from "firebase/firestore"
 import db from '@/firebase'
 import Loader from "./components/Loader";
+import TextInputComponent from "./components/TextInput";
+import { Picker } from '@react-native-picker/picker';
 
 // Define an enum or constants for better readability
 const Section = {
@@ -335,10 +337,24 @@ export default function Index() {
       },
     }
   })
+  const [rechargeAmount, setRechargeAmount] = useState('')
+  const [vendorMobileNumberForRecharge, setVendorMobileNumberForRecharge] = useState('')
+  const [allCategories, setAllCategories] = useState(null)
+  const [categoryDataForEdit, setCategoryDataForEdit] = useState(null)
+  const [selectedPlanType, setSelectedPlanType] = useState('FREE')
 
   useEffect(() => {
     initializeDeviceAuth();
   }, []);
+
+  useEffect(() => {
+    if (selectedPlanType === 'monthly') {
+      setRechargeAmount(360)
+    }
+    if (selectedPlanType === 'yearly') {
+      setRechargeAmount(3600)
+    }
+  }, [selectedPlanType])
 
   const initializeDeviceAuth = async () => {
     try {
@@ -525,6 +541,28 @@ export default function Index() {
     }
   };
 
+  const fetchAllCategories = async () => {
+    try {
+      const categoriesRef = collection(db, 'categories');
+      const categoriesSnap = await getDocs(categoriesRef);
+
+      const categoriesList = categoriesSnap.docs.map((doc) => ({
+        ...doc.data(),
+        id: doc.id,
+      }));
+
+      setAllCategories(categoriesList)
+    } catch (error) {
+      console.error('Error fetching categories:', error);
+    }
+  }
+
+  useEffect(() => {
+    fetchAllVendors();
+    fetchAllCustomers()
+    fetchAllCategories()
+  }, []);
+
   const registerVendor = async () => {
     try {
       setIsCommonLoaderVisible(true)
@@ -603,10 +641,88 @@ export default function Index() {
     }
   }
 
-  useEffect(() => {
-    fetchAllVendors();
-    fetchAllCustomers()
-  }, []);
+  const generateRechargeId = () => {
+    const nums = '0123456789';
+    const letters = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+    // Get 6 random numbers and 6 random letters
+    const randomNums = Array.from({ length: 6 }, () => nums[Math.floor(Math.random() * nums.length)]);
+    const randomLetters = Array.from({ length: 6 }, () => letters[Math.floor(Math.random() * 52)]);
+
+    // Combine and shuffle
+    return [...randomNums, ...randomLetters]
+      .sort(() => Math.random() - 0.5)
+      .join('');
+  }
+
+  const addRecharge = async () => {
+    if(!window.confirm('Are you sure want to do this recharge?')) return
+    try {
+      setIsCommonLoaderVisible(true)
+      if (!rechargeAmount || Number(rechargeAmount) === 0) {
+        alert('Please enter a valid amount.')
+        return;
+      }
+      if (!vendorMobileNumberForRecharge) {
+        alert('Please enter a valid vendor mobile number.')
+        return;
+      }
+      const vendorRef = doc(db, 'users', vendorMobileNumberForRecharge)
+      const vendorSnap = await getDoc(vendorRef)
+
+      if (!vendorSnap.exists()) {
+        alert('Vendor not found.')
+        return;
+      }
+      const vendorData = vendorSnap.data()
+
+      const rechargeId = generateRechargeId()
+      const rechargeRef = doc(collection(db, 'users', vendorMobileNumberForRecharge, 'recharges'), rechargeId);
+
+      await setDoc(rechargeRef, {
+        rechargeId: rechargeId,
+        amount: Number(rechargeAmount), // Ensure numeric value
+        timestamp: new Date(), // Consistent format
+        plan: selectedPlanType,
+      });
+
+      let totalAmountToAdd = Number(rechargeAmount);
+      if (selectedPlanType === 'yearly') {
+        totalAmountToAdd += 720; // Now properly numeric
+      }
+
+      await updateDoc(vendorRef, {
+        balance: Number(vendorData.balance) + totalAmountToAdd
+      })
+
+      alert('Recharge added successfully!')
+      // window.location.reload()
+
+      setVendorMobileNumberForRecharge('')
+      setRechargeAmount('')
+
+    } catch (error) {
+      console.error('Error adding recharge amount: ', error)
+    } finally {
+      setIsCommonLoaderVisible(false)
+    }
+  }
+
+  const deleteCategory = async (categoryId) => {
+    if (!window.confirm('Are you sure you want to delete this category?')) return
+
+    try {
+      setIsCommonLoaderVisible(true)
+      const categoryRef = doc(db, 'categories', categoryId)
+      await deleteDoc(categoryRef)
+      alert('Category deleted successfully!')
+      fetchAllCategories()
+    } catch (error) {
+      console.error('Error deleting category: ', error)
+    } finally {
+      setIsCommonLoaderVisible(false)
+    }
+  }
 
   const toggleSection = (sectionName) => {
     setActiveSection(activeSection === sectionName ? Section.NONE : sectionName);
@@ -690,11 +806,11 @@ export default function Index() {
           <Text className="font-bold text-primary text-[16px] text-center" >Add Recharge</Text>
         </TouchableOpacity>
 
-        {/* Add Category */}
+        {/* Category */}
         <TouchableOpacity
           onPress={() => toggleSection(Section.CATEGORY)}
           className={`h-full w-[120px] border-[5px] rounded-[5px] ${isSectionActive(Section.CATEGORY) ? 'bg-wheat' : 'bg-white'} border-primary p-[10px] items-center justify-center`} >
-          <Text className="font-bold text-primary text-[16px] text-center" >Add Category</Text>
+          <Text className="font-bold text-primary text-[16px] text-center" >Category</Text>
         </TouchableOpacity>
 
         {/* Register Vendor */}
@@ -770,8 +886,60 @@ export default function Index() {
             }}
           />
         )}
-        {activeSection === Section.RECHARGE && <Text>Add Recharge Section</Text>}
-        {activeSection === Section.CATEGORY && <Text>Add Category Section</Text>}
+        {activeSection === Section.RECHARGE && (
+          <View className='flex-1 gap-[10px]' >
+            <Text className='text-center font-bold text-[25px]' >Add Recharge</Text>
+            <TextInputComponent value={vendorMobileNumberForRecharge} onChangeText={setVendorMobileNumberForRecharge} maxLength={10} keyboardType={'numeric'} placeholder="Vendor Mobile Number" />
+            <View className='border border-gray-300 rounded-[10px]'>
+              <Picker
+                selectedValue={selectedPlanType}
+                onValueChange={(itemValue) => setSelectedPlanType(itemValue)}
+                style={{ padding: 15, borderRadius: 10 }}
+                mode="dropdown"
+              >
+                <Picker.Item label="FREE" value="FREE" />
+                <Picker.Item label="₹360" value="monthly" />
+                <Picker.Item label="₹3600 (+₹720 FREE)" value="yearly" />
+                <Picker.Item label="Custom" value="custom" />
+              </Picker>
+            </View>
+            <TextInputComponent value={rechargeAmount} onChangeText={setRechargeAmount} keyboardType={'numeric'} placeholder="Enter recharge amount" />
+            <TouchableOpacity onPress={addRecharge} className='w-full bg-primary p-[10px] rounded-[5px]' ><Text className='text-white text-center text-lg' >Add</Text></TouchableOpacity>
+          </View>
+        )}
+        {activeSection === Section.CATEGORY && (
+          <View className='flex-1' >
+            <FlatList
+              data={allCategories}
+              renderItem={({ item }) => {
+                return (
+                  <>
+                    <View className='p-[5px] border border-[#ccc] rounded-[5px] mb-[3px] flex-row gap-[5px]' >
+                      <Image style={{ height: 100, width: 100 }} className='rounded-[5px]' source={item?.categoryImage ? { uri: item?.categoryImage } : require('../assets/images/placeholderImage.png')} />
+                      <View className='flex-1 items-center justify-between' >
+                        <Text className='text-[16px]' >{item?.categoryName || 'No category name...'}</Text>
+                        <View className='w-full gap-[5px] flex-row' >
+                          <TouchableOpacity onPress={() => setCategoryDataForEdit(item)} className='w-full p-[5px] rounded-[5px] bg-primaryYellow flex-1' ><Text className='text-center text-lg'>Edit</Text></TouchableOpacity>
+                          <TouchableOpacity onPress={() => deleteCategory(item?.id)} className='w-full p-[5px] rounded-[5px] bg-primaryRed flex-1' ><Text className='text-white text-center text-lg'>Delete</Text></TouchableOpacity>
+                        </View>
+                      </View>
+                    </View>
+                    {categoryDataForEdit && categoryDataForEdit?.id === item?.id && (
+                      <Modal animationType="slide" transparent={true} visible={true}>
+                        <View className='flex-1 p-[10px] bg-[#00000060] items-center justify-center' >
+                          <View className='h-full w-full bg-white rounded-[5px] p-[10px]' >
+                            <Text className='font-bold text-center text-primary text-[30px]' >Edit Category</Text>
+                            <></>
+                          </View>
+                        </View>
+                      </Modal>
+                    )}
+                  </>
+                )
+              }}
+            />
+          </View>
+        )}
         {activeSection === Section.REGISTER && <Text>Register Vendor Section</Text>}
       </View>
 
