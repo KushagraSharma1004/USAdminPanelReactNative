@@ -5,6 +5,9 @@ import db from '@/firebase'
 import Loader from "./components/Loader";
 import TextInputComponent from "./components/TextInput";
 import { Picker } from '@react-native-picker/picker';
+import { v4 as uuidv4 } from 'uuid';
+import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { launchCamera, launchImageLibrary } from 'react-native-image-picker';
 
 // Define an enum or constants for better readability
 const Section = {
@@ -342,6 +345,9 @@ export default function Index() {
   const [allCategories, setAllCategories] = useState(null)
   const [categoryDataForEdit, setCategoryDataForEdit] = useState(null)
   const [selectedPlanType, setSelectedPlanType] = useState('FREE')
+  const [categoryImage, setCategoryImage] = useState(null)
+  const [newCategoryData, setNewCategoryData] = useState({ categoryName: '', categoryImage: '' });
+  const [isAddNewCategoryModalVisible, setIsAddNewCategoryModalVisible] = useState(false)
 
   useEffect(() => {
     initializeDeviceAuth();
@@ -656,7 +662,7 @@ export default function Index() {
   }
 
   const addRecharge = async () => {
-    if(!window.confirm('Are you sure want to do this recharge?')) return
+    if (!window.confirm('Are you sure want to do this recharge?')) return
     try {
       setIsCommonLoaderVisible(true)
       if (!rechargeAmount || Number(rechargeAmount) === 0) {
@@ -723,6 +729,123 @@ export default function Index() {
       setIsCommonLoaderVisible(false)
     }
   }
+
+  const uploadCategoryImage = async () => {
+    if (!categoryImage) return null;
+
+    try {
+      // Convert the image URI to a blob
+      const blob = await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.onload = function () {
+          resolve(xhr.response);
+        };
+        xhr.onerror = function () {
+          reject(new TypeError('Network request failed'));
+        };
+        xhr.responseType = 'blob';
+        xhr.open('GET', categoryImage, true);
+        xhr.send(null);
+      });
+
+      const storage = getStorage();
+      const storageRef = ref(storage, `categoryImages/${uuidv4()}.jpg`);
+
+      // Upload the blob
+      await uploadBytes(storageRef, blob);
+
+      // Clean up the blob
+      if (blob.close) {
+        blob.close();
+      }
+
+      const downloadURL = await getDownloadURL(storageRef);
+      return downloadURL;
+    } catch (error) {
+      console.error("Error uploading customer image: ", error);
+      setErrorMessage('Failed to upload customer image. Please try again.');
+      return null;
+    }
+  };
+
+  const handleSaveNewCategoryImage = async () => {
+    try {
+      setIsCommonLoaderVisible(true);
+      const imageUrl = await uploadCategoryImage();
+      if (imageUrl && categoryDataForEdit) {
+        await updateDoc(doc(db, 'categories', categoryDataForEdit.id), {
+          categoryImage: imageUrl,
+          categoryName: categoryDataForEdit.categoryName
+        });
+        fetchAllCategories();
+        setCategoryDataForEdit(null);
+        setCategoryImage(null);
+        alert('Category updated successfully.');
+      } else {
+        alert('No image selected or category data missing.');
+      }
+    } catch (error) {
+      console.error('Error updating category: ', error);
+      alert('Error updating category. Please try again.');
+    } finally {
+      setIsCommonLoaderVisible(false);
+    }
+  };
+
+  const handlePickCategoryImage = (type) => {
+    const options = {
+      mediaType: 'photo',
+      includeBase64: false,
+      maxHeight: 200,
+      maxWidth: 200,
+    };
+
+    const callback = (response) => {
+      if (response.didCancel) {
+        console.log('User cancelled image picker');
+      } else if (response.errorCode) {
+        console.error('ImagePicker Error: ', response.errorMessage);
+        alert('Error selecting image: ' + response.errorMessage);
+      } else if (response.assets && response.assets.length > 0) {
+        const source = response.assets[0].uri;
+        setCategoryImage(source);
+      }
+    };
+
+    if (type === 'camera') {
+      launchCamera(options, callback);
+    } else {
+      launchImageLibrary(options, callback);
+    }
+  };
+
+  const handleAddNewCategory = async () => {
+    try {
+      setIsCommonLoaderVisible(true);
+      if (!newCategoryData.categoryName) {
+        alert('Please enter a category name.');
+        return;
+      }
+      const imageUrl = await uploadCategoryImage();
+      const categoryId = uuidv4();
+      const categoryRef = doc(db, 'categories', categoryId);
+      await setDoc(categoryRef, {
+        id: categoryId,
+        categoryName: newCategoryData.categoryName,
+        categoryImage: imageUrl || null,
+        createdAt: serverTimestamp(),
+      });
+      fetchAllCategories();
+      setNewCategoryData({ categoryName: '', categoryImage: '' });
+      setCategoryImage(null);
+      alert('Category added successfully.');
+    } catch (error) {
+      console.error('Error adding category: ', error);
+      alert('Error adding category. Please try again.');
+    } finally {
+      setIsCommonLoaderVisible(false);
+    }
+  };
 
   const toggleSection = (sectionName) => {
     setActiveSection(activeSection === sectionName ? Section.NONE : sectionName);
@@ -908,41 +1031,156 @@ export default function Index() {
           </View>
         )}
         {activeSection === Section.CATEGORY && (
-          <View className='flex-1' >
+          <View className='flex-1'>
+            <TouchableOpacity
+              onPress={() => setIsAddNewCategoryModalVisible(true)}
+              className='w-full p-[10px] bg-primaryGreen rounded-[5px] mb-[5px]'
+            >
+              <Text className='text-white text-center text-lg'>Add New Category</Text>
+            </TouchableOpacity>
             <FlatList
               data={allCategories}
               renderItem={({ item }) => {
                 return (
                   <>
-                    <View className='p-[5px] border border-[#ccc] rounded-[5px] mb-[3px] flex-row gap-[5px]' >
-                      <Image style={{ height: 100, width: 100 }} className='rounded-[5px]' source={item?.categoryImage ? { uri: item?.categoryImage } : require('../assets/images/placeholderImage.png')} />
-                      <View className='flex-1 items-center justify-between' >
-                        <Text className='text-[16px]' >{item?.categoryName || 'No category name...'}</Text>
-                        <View className='w-full gap-[5px] flex-row' >
-                          <TouchableOpacity onPress={() => setCategoryDataForEdit(item)} className='w-full p-[5px] rounded-[5px] bg-primaryYellow flex-1' ><Text className='text-center text-lg'>Edit</Text></TouchableOpacity>
-                          <TouchableOpacity onPress={() => deleteCategory(item?.id)} className='w-full p-[5px] rounded-[5px] bg-primaryRed flex-1' ><Text className='text-white text-center text-lg'>Delete</Text></TouchableOpacity>
+                    <View className='p-[5px] border border-[#ccc] rounded-[5px] mb-[3px] flex-row gap-[5px]'>
+                      <Image
+                        style={{ height: 100, width: 100 }}
+                        className='rounded-[5px]'
+                        source={item?.categoryImage ? { uri: item?.categoryImage } : require('../assets/images/placeholderImage.png')}
+                      />
+                      <View className='flex-1 items-center justify-between'>
+                        <Text className='text-[16px]'>{item?.categoryName || 'No category name...'}</Text>
+                        <View className='w-full gap-[5px] flex-row'>
+                          <TouchableOpacity
+                            onPress={() => setCategoryDataForEdit(item)}
+                            className='w-full p-[5px] rounded-[5px] bg-primaryYellow flex-1'
+                          >
+                            <Text className='text-center text-lg'>Edit</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            onPress={() => deleteCategory(item?.id)}
+                            className='w-full p-[5px] rounded-[5px] bg-primaryRed flex-1'
+                          >
+                            <Text className='text-white text-center text-lg'>Delete</Text>
+                          </TouchableOpacity>
                         </View>
                       </View>
                     </View>
                     {categoryDataForEdit && categoryDataForEdit?.id === item?.id && (
                       <Modal animationType="slide" transparent={true} visible={true}>
-                        <View className='flex-1 p-[10px] bg-[#00000060] items-center justify-center' >
-                          <View className='h-full w-full bg-white rounded-[5px] p-[10px]' >
-                            <Text className='font-bold text-center text-primary text-[30px]' >Edit Category</Text>
-                            <></>
+                        <View className='flex-1 p-[10px] bg-[#00000060] items-center justify-center'>
+                          <View className='w-full max-w-md bg-white rounded-[5px] p-[10px] gap-[10px]'>
+                            <Text className='font-bold text-center text-primary text-[30px]'>Edit Category</Text>
+                            <TextInputComponent
+                              placeholder="Category Name"
+                              value={categoryDataForEdit.categoryName}
+                              onChangeText={(text) => setCategoryDataForEdit({ ...categoryDataForEdit, categoryName: text })}
+                            />
+                            <View className='gap-[5px] w-full p-[10px] border-[2px] border-primary bg-[#d4e3fc] rounded-[5px]'>
+                              <Text className='text-[20px] text-primary text-center mb-[5px]'>Upload an Image</Text>
+                              <TouchableOpacity
+                                onPress={() => handlePickCategoryImage('camera')}
+                                className='flex-1 p-[10px] bg-primary rounded-[5px]'
+                              >
+                                <Text className='text-white text-center'>Take Photo</Text>
+                              </TouchableOpacity>
+                              <TouchableOpacity
+                                onPress={() => handlePickCategoryImage('library')}
+                                className='flex-1 p-[10px] bg-primary rounded-[5px]'
+                              >
+                                <Text className='text-white text-center'>Choose from Library</Text>
+                              </TouchableOpacity>
+                            </View>
+                            {categoryImage && (
+                              <Image
+                                source={{ uri: categoryImage }}
+                                style={{ width: 100, height: 100 }}
+                                className='h-[100px] rounded-[5px] self-center'
+                              />
+                            )}
+                            <View className='flex-row gap-[5px]'>
+                              <TouchableOpacity
+                                onPress={handleSaveNewCategoryImage}
+                                className='flex-1 p-[10px] bg-primaryGreen rounded-[5px]'
+                              >
+                                <Text className='text-white text-center'>Save</Text>
+                              </TouchableOpacity>
+                              <TouchableOpacity
+                                onPress={() => {
+                                  setCategoryDataForEdit(null);
+                                  setCategoryImage(null);
+                                }}
+                                className='flex-1 p-[10px] bg-primaryRed rounded-[5px]'
+                              >
+                                <Text className='text-white text-center'>Cancel</Text>
+                              </TouchableOpacity>
+                            </View>
                           </View>
                         </View>
                       </Modal>
                     )}
                   </>
-                )
+                );
               }}
             />
           </View>
         )}
         {activeSection === Section.REGISTER && <Text>Register Vendor Section</Text>}
       </View>
-
+      {isAddNewCategoryModalVisible && (
+        <Modal animationType="slide" transparent={true} visible={isAddNewCategoryModalVisible}>
+          <View className='flex-1 p-[10px] bg-[#00000060] items-center justify-center'>
+            <View className='w-full max-w-md bg-white rounded-[5px] p-[10px] gap-[10px]'>
+              <Text className='font-bold text-center text-primary text-[30px]'>Add Category</Text>
+              <TextInputComponent
+                placeholder="Category Name"
+                value={newCategoryData.categoryName}
+                onChangeText={(text) => setNewCategoryData({ ...newCategoryData, categoryName: text })}
+              />
+              <View className='gap-[5px] w-full p-[10px] border-[2px] border-primary bg-[#d4e3fc] rounded-[5px]'>
+                <Text className='text-[20px] text-primary text-center mb-[5px]'>Upload an Image</Text>
+                <TouchableOpacity
+                  onPress={() => handlePickCategoryImage('camera')}
+                  className='flex-1 p-[10px] bg-primary rounded-[5px]'
+                >
+                  <Text className='text-white text-center'>Take Photo</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => handlePickCategoryImage('library')}
+                  className='flex-1 p-[10px] bg-primary rounded-[5px]'
+                >
+                  <Text className='text-white text-center'>Choose from Library</Text>
+                </TouchableOpacity>
+              </View>
+              {categoryImage && (
+                <Image
+                  source={{ uri: categoryImage }}
+                  style={{ width: 100, height: 100 }}
+                  className='h-[100px] rounded-[5px] self-center'
+                />
+              )}
+              <View className='flex-row gap-[5px]'>
+                <TouchableOpacity
+                  onPress={handleAddNewCategory}
+                  className='flex-1 p-[10px] bg-primaryGreen rounded-[5px]'
+                >
+                  <Text className='text-white text-center'>Save</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => {
+                    setIsAddNewCategoryModalVisible(false)
+                    setCategoryImage(null);
+                  }}
+                  className='flex-1 p-[10px] bg-primaryRed rounded-[5px]'
+                >
+                  <Text className='text-white text-center'>Cancel</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+      )}
     </View>
   );
 }
