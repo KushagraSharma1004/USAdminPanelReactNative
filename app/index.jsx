@@ -1,13 +1,24 @@
 import { useEffect, useState } from "react";
-import { FlatList, Image, ScrollView, Text, TouchableOpacity, View, TextInput, Alert, Linking, Modal } from "react-native";
+import { FlatList, Image, ScrollView, Text, TouchableOpacity, View, TextInput, Alert, Linking, Modal, Platform } from "react-native";
 import { collection, doc, getDocs, serverTimestamp, setDoc, updateDoc, getDoc, deleteDoc } from "firebase/firestore"
 import db from '@/firebase'
 import Loader from "./components/Loader";
 import TextInputComponent from "./components/TextInput";
 import { Picker } from '@react-native-picker/picker';
 import { v4 as uuidv4 } from 'uuid';
-import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import {
+  getStorage,
+  ref,
+  uploadBytes,
+  getDownloadURL,
+  listAll,
+  getMetadata,
+  deleteObject
+} from 'firebase/storage';
 import { launchCamera, launchImageLibrary } from 'react-native-image-picker';
+import { LegendList } from "@legendapp/list"
+import * as ImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system';
 
 // Define an enum or constants for better readability
 const Section = {
@@ -16,6 +27,7 @@ const Section = {
   RECHARGE: 'recharge',
   CATEGORY: 'category',
   REGISTER: 'register',
+  ASSETS: 'assets',
   NONE: null,
 };
 
@@ -348,6 +360,12 @@ export default function Index() {
   const [categoryImage, setCategoryImage] = useState(null)
   const [newCategoryData, setNewCategoryData] = useState({ categoryName: '', categoryImage: '' });
   const [isAddNewCategoryModalVisible, setIsAddNewCategoryModalVisible] = useState(false)
+  const [vendorsSearchQuery, setVendorsSearchQuery] = useState('')
+  const [customersSearchQuery, setCustomersSearchQuery] = useState('')
+  const [assetsList, setAssetsList] = useState([]);
+  const [isLoadingAssets, setIsLoadingAssets] = useState(false);
+  const [newFileName, setNewFileName] = useState(''); // for rename
+  const [editingFile, setEditingFile] = useState(null);
 
   useEffect(() => {
     initializeDeviceAuth();
@@ -373,7 +391,7 @@ export default function Index() {
         setFingerprintDetails(JSON.parse(storedComponents));
       }
 
-      console.log('Enhanced Device ID:', uniqueDeviceId);
+      // console.log('Enhanced Device ID:', uniqueDeviceId);
 
       // Check if this device is already authenticated
       const authDocRef = doc(db, 'adminAuth', 'trustedDevices');
@@ -424,7 +442,7 @@ export default function Index() {
         }
       }
     } else {
-      Alert.alert('Error', 'Invalid admin password');
+      alert('Error', 'Invalid admin password');
     }
   };
 
@@ -449,17 +467,6 @@ export default function Index() {
 
     setIsAuthenticated(false);
     setAdminPassword('');
-  };
-
-  // Debug function to show fingerprint details
-  const showFingerprintDetails = () => {
-    if (fingerprintDetails) {
-      Alert.alert(
-        'Fingerprint Details',
-        fingerprintDetails.map(([key, value]) => `${key}: ${value}`).join('\n'),
-        [{ text: 'OK' }]
-      );
-    }
   };
 
   const fetchAllVendors = async () => {
@@ -853,6 +860,221 @@ export default function Index() {
 
   const isSectionActive = (sectionName) => activeSection === sectionName;
 
+  // Fetch all files from /uploads folder
+  const fetchAssets = async () => {
+    setIsLoadingAssets(true);
+    try {
+      const storage = getStorage();
+      const folderRef = ref(storage, 'uploads/');
+      const result = await listAll(folderRef);
+
+      const files = await Promise.all(
+        result.items.map(async (itemRef) => {
+          const url = await getDownloadURL(itemRef);
+          const metadata = await getMetadata(itemRef);
+          return {
+            name: itemRef.name,
+            fullPath: itemRef.fullPath,
+            url,
+            size: metadata.size,
+            timeCreated: metadata.timeCreated,
+          };
+        })
+      );
+
+      setAssetsList(files.sort((a, b) => b.timeCreated.localeCompare(a.timeCreated)));
+    } catch (err) {
+      console.error(err);
+      alert('Error', 'Failed to load assets');
+    } finally {
+      setIsLoadingAssets(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchAssets()
+  }, [])
+
+  // Delete file
+  const deleteAsset = async (fullPath, name) => {
+    if (!window.confirm('Are you sure, you want to delete this image/video?')) {
+      return
+    }
+    try {
+      await deleteObject(ref(getStorage(), fullPath));
+      fetchAssets();
+      alert('Deleted', `${name} removed`);
+    } catch (err) {
+      alert('Error', 'Could not delete');
+    }
+
+  };
+
+  // Rename file
+  const renameAsset = async (oldPath, oldName, newName) => {
+    if (!newName.trim() || newName === oldName) return;
+    try {
+      const storage = getStorage();
+      const oldRef = ref(storage, oldPath);
+      const blob = await fetch(await getDownloadURL(oldRef)).then(r => r.blob());
+
+      const ext = oldName.split('.').pop();
+      const finalName = newName.endsWith(`.${ext}`) ? newName : `${newName}.${ext}`;
+
+      await uploadBytes(ref(storage, `uploads/${finalName}`), blob);
+      await deleteObject(oldRef);
+
+      setEditingFile(null);
+      setNewFileName('');
+      fetchAssets();
+      alert('Renamed', `Now: ${finalName}`);
+    } catch (err) {
+      alert('Error', 'Rename failed');
+    }
+  };
+
+  const uploadMedia = async () => {
+    try {
+      // Request permissions
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission Denied', 'Please allow access to photos & videos');
+        return;
+      }
+
+      // Launch media library with proper configuration
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.All, // This allows both images and videos
+        allowsMultipleSelection: false,
+        allowsEditing: false,
+        quality: 1,
+        videoMaxDuration: 60, // 60 seconds max for videos
+        videoQuality: ImagePicker.UIImagePickerControllerQualityType.High,
+      });
+
+      if (result.canceled || !result.assets?.[0]) {
+        console.log('User cancelled media picker');
+        return;
+      }
+
+      const asset = result.assets[0];
+      console.log('Selected asset:', asset); // Debug log
+
+      // Better file type detection
+      const isVideo = asset.type === 'video' ||
+        asset.uri?.includes('.mp4') ||
+        asset.uri?.includes('.mov') ||
+        asset.uri?.includes('.avi') ||
+        asset.fileName?.match(/\.(mp4|mov|avi|webm|mkv|3gp)$/i);
+
+      const isImage = asset.type === 'image' ||
+        !isVideo; // Fallback to image if not clearly a video
+
+      const fileExtension = isVideo ? 'mp4' : 'jpg';
+      const mimeType = isVideo ? 'video/mp4' : 'image/jpeg';
+
+      const fileName = asset.fileName || `file_${Date.now()}.${fileExtension}`;
+      const uniqueName = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}-${fileName}`;
+
+      Alert.alert(
+        'Uploading...',
+        `Uploading ${isVideo ? 'video' : 'image'}... This may take a moment.`,
+        [{ text: 'OK' }]
+      );
+
+      let blob;
+
+      if (Platform.OS === 'web') {
+        // Web: simple fetch
+        const response = await fetch(asset.uri);
+        blob = await response.blob();
+      } else {
+        // Mobile: Use FileSystem for reliable blob creation
+        try {
+          const fileInfo = await FileSystem.getInfoAsync(asset.uri);
+          if (!fileInfo.exists) {
+            throw new Error('File does not exist');
+          }
+
+          // For videos on mobile, we need to be more careful
+          if (isVideo) {
+            // For videos, use XMLHttpRequest which handles videos better
+            blob = await new Promise((resolve, reject) => {
+              const xhr = new XMLHttpRequest();
+              xhr.open('GET', asset.uri, true);
+              xhr.responseType = 'blob';
+              xhr.onload = () => {
+                if (xhr.status === 200) {
+                  resolve(xhr.response);
+                } else {
+                  reject(new Error(`Failed to load video: ${xhr.status}`));
+                }
+              };
+              xhr.onerror = () => reject(new Error('Network error'));
+              xhr.send();
+            });
+          } else {
+            // For images, use FileSystem
+            const base64 = await FileSystem.readAsStringAsync(asset.uri, {
+              encoding: FileSystem.EncodingType.Base64,
+            });
+            const binary = atob(base64);
+            const array = [];
+            for (let i = 0; i < binary.length; i++) {
+              array.push(binary.charCodeAt(i));
+            }
+            blob = new Blob([new Uint8Array(array)], { type: mimeType });
+          }
+        } catch (fileError) {
+          console.error('File processing error:', fileError);
+          throw new Error(`Failed to process ${isVideo ? 'video' : 'image'} file`);
+        }
+      }
+
+      // Upload to Firebase Storage
+      const storageRef = ref(getStorage(), `uploads/${uniqueName}`);
+
+      // Add metadata for better handling
+      const metadata = {
+        contentType: mimeType,
+        customMetadata: {
+          originalName: asset.fileName || 'unknown',
+          fileType: isVideo ? 'video' : 'image',
+          uploadedAt: new Date().toISOString(),
+        }
+      };
+
+      const uploadTask = await uploadBytes(storageRef, blob, metadata);
+
+      // Get download URL
+      const downloadURL = await getDownloadURL(uploadTask.ref);
+
+      // Refresh assets list
+      await fetchAssets();
+
+      // Create pretty URL for sharing
+      const prettyUrl = `https://dl.unoshops.com/u/${uniqueName}`;
+
+      // Copy to clipboard if available
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(prettyUrl);
+      }
+
+      Alert.alert(
+        'Upload Successful!',
+        `${isVideo ? 'Video' : 'Image'} uploaded successfully!\n\nURL: ${prettyUrl}\n\nURL has been copied to clipboard.`,
+        [{ text: 'OK' }]
+      );
+
+    } catch (error) {
+      console.error('Upload error:', error);
+      Alert.alert(
+        'Upload Failed',
+        error.message || `Failed to upload ${isVideo ? 'video' : 'image'}. Please try again.`
+      );
+    }
+  };
+
   if (!isAuthenticated) {
     return (
       <View className="flex-1 bg-white justify-center items-center p-5">
@@ -882,18 +1104,18 @@ export default function Index() {
             </Text>
           </TouchableOpacity>
 
-          <TouchableOpacity
+          {/* <TouchableOpacity
             className="bg-gray-200 py-2 rounded-lg"
             onPress={showFingerprintDetails}
           >
             <Text className="text-gray-700 text-center text-sm">
               Show Fingerprint Details
             </Text>
-          </TouchableOpacity>
+          </TouchableOpacity> */}
 
-          <Text className="text-xs text-gray-500 text-center mt-4">
+          {/* <Text className="text-xs text-gray-500 text-center mt-4">
             Enhanced Device ID: {deviceId ? `${deviceId.substring(0, 16)}...` : 'Generating...'}
-          </Text>
+          </Text> */}
         </View>
       </View>
     );
@@ -943,76 +1165,184 @@ export default function Index() {
           <Text className="font-bold text-primary text-[16px] text-center" >Register Vendor</Text>
         </TouchableOpacity>
 
+        {/* Assets Manager */}
+        <TouchableOpacity
+          onPress={() => {
+            toggleSection(Section.ASSETS);
+            if (isSectionActive(Section.ASSETS)) fetchAssets();
+          }}
+          className={`h-full w-[120px] border-[5px] rounded-[5px] ${isSectionActive(Section.ASSETS) ? 'bg-wheat' : 'bg-white'
+            } border-primary p-[10px] items-center justify-center`}
+        >
+          <Text className="font-bold text-primary text-[16px] text-center">Assets</Text>
+          <Text className="font-bold text-primary text-[16px] text-center">({assetsList.length})</Text>
+        </TouchableOpacity>
+
       </ScrollView>
 
       <View className="flex-1 p-[5px]">
+
         {activeSection === Section.VENDORS && (
-          <FlatList
-            data={allVendorsList.sort((a, b) => { const dateA = a.timestamp?.toDate?.(); const dateB = b.timestamp?.toDate?.(); const timeA = dateA ? dateA.getTime() : 0; const timeB = dateB ? dateB.getTime() : 0; return timeB - timeA; })}
-            keyExtractor={item => item.id}
-            renderItem={({ item, index }) => (
-              <View className="p-[5px] border border-[#ccc] rounded-[10px] mb-[5px] gap-[5px]" >
-                <Text className="text-[10px] h-[20px] w-[20px] rounded-tl-[5px] rounded-br-[5px] bg-primary text-white text-center leading-none absolute top-[0px] left-[0px] z-50 flex items-center justify-center" >{allVendorsList.length - index}</Text>
-                <View className="flex-row gap-[5px]" >
-                  <Image style={{ height: 150, width: 150 }} className="h-[150px] w-[150px] rounded-[5px]" source={item?.businessImageURL ? { uri: item?.businessImageURL } : require('../assets/images/placeholderImage.png')} />
-                  <View className="flex-1 gap-[5px]" >
-                    <View className="flex-row w-full justify-between items-center gap-[5px]" >
-                      <Text className={`${item?.isVendorActive === 'Active' ? 'text-primaryGreen' : 'text-primaryRed'}`} >{item?.isVendorActive}</Text>
-                      <Text className="text-primaryGreen border rounded px-[3px]" >₹{item?.balance || '0'}</Text>
-                      <Text>{item?.timestamp?.toDate?.()?.toLocaleString() || 'No date...'}</Text>
-                    </View>
-                    <Text><Text className="font-bold" >Owner: </Text>{item?.vendorName || 'No name...'}</Text>
-                    <Text className="text-primary font-bold" >{item?.vendorMobileNumber || 'No number...'}</Text>
-                    <Text className="text-primary font-bold" >{item?.businessName || 'No business name...'}</Text>
-                    <Text><Text className="font-bold" >Cateogry: </Text>{item?.category || 'No category...'}</Text>
-                    <Text><Text className="font-bold" >Password: </Text>{item?.vendorPassword || 'No password...'}</Text>
-                    <View className="flex-row justify-between gap-[5px]" >
-                      <Text><Text className="text-primary font-bold" >{item?.vendorReferralCode || 'NA'}</Text> [ {item?.referralCode || 'NA'} ]</Text>
-                      <Text><Text className="font-bold" >Comm.: </Text>₹{item?.vendorCommission || '0'}</Text>
+          <>
+            <View className="mb-[5px] w-full">
+              <TextInput
+                className="border border-[#ccc] rounded-[5px] p-[10px] text-black"
+                placeholder="Search vendors..."
+                value={vendorsSearchQuery}
+                onChangeText={setVendorsSearchQuery}
+              />
+            </View>
+            <LegendList
+              data={allVendorsList
+                .filter(vendor => {
+                  const q = vendorsSearchQuery?.trim().toLowerCase();
+                  if (!q) return true;
+                  return (
+                    vendor?.name?.toLowerCase()?.includes(q) ||
+                    vendor?.vendorName?.toLowerCase()?.includes(q) ||
+                    vendor?.vendorMobileNumber?.toLowerCase()?.includes(q) ||
+                    vendor?.businessName?.toLowerCase()?.includes(q) ||
+                    vendor?.category?.toLowerCase()?.includes(q) ||
+                    vendor?.vendorPassword?.toLowerCase()?.includes(q) ||
+                    vendor?.vendorReferralCode?.toLowerCase()?.includes(q) ||
+                    Object.values(vendor?.savedAddresses || {})
+                      .some(val => typeof val === 'string' && val.toLowerCase().includes(q))
+                  )
+                })
+                .sort((a, b) => {
+                  const dateA = a.timestamp?.toDate?.();
+                  const dateB = b.timestamp?.toDate?.();
+                  const timeA = dateA ? dateA.getTime() : 0;
+                  const timeB = dateB ? dateB.getTime() : 0;
+                  return timeB - timeA;
+                })}
+
+              keyExtractor={item => item.id}
+              renderItem={({ item, index }) => (
+                <View className="p-[5px] border border-[#ccc] rounded-[10px] mb-[5px] gap-[5px]" >
+                  <Text className="text-[10px] h-[20px] w-[20px] rounded-tl-[5px] rounded-br-[5px] bg-primary text-white text-center leading-none absolute top-[0px] left-[0px] z-50 flex items-center justify-center" >{allVendorsList.length - index}</Text>
+                  <View className="flex-row gap-[5px]" >
+                    <Image style={{ height: 150, width: 150 }} className="h-[150px] w-[150px] rounded-[5px]" source={item?.businessImageURL ? { uri: item?.businessImageURL } : require('../assets/images/placeholderImage.png')} />
+                    <View className="flex-1 gap-[5px]" >
+                      <View className="flex-row w-full justify-between items-center gap-[5px]" >
+                        <Text className={`${item?.isVendorActive === 'Active' ? 'text-primaryGreen' : 'text-primaryRed'}`} >{item?.isVendorActive}</Text>
+                        <Text className="text-primaryGreen border rounded px-[3px]" >₹{item?.balance || '0'}</Text>
+                        <Text>{item?.timestamp?.toDate?.()?.toLocaleString() || 'No date...'}</Text>
+                      </View>
+                      <Text><Text className="font-bold" >Owner: </Text>{item?.vendorName || 'No name...'}</Text>
+                      <Text className="text-primary font-bold" >{item?.vendorMobileNumber || 'No number...'}</Text>
+                      <Text className="text-primary font-bold" >{item?.businessName || 'No business name...'}</Text>
+                      <Text><Text className="font-bold" >Category: </Text>{item?.category || 'No category...'}</Text>
+                      <Text><Text className="font-bold" >Password: </Text>{item?.vendorPassword || 'No password...'}</Text>
+                      <View className="flex-row justify-between gap-[5px]" >
+                        <Text><Text className="text-primary font-bold" >{item?.vendorReferralCode || 'NA'}</Text> [ {item?.referralCode || 'NA'} ]</Text>
+                        <Text><Text className="font-bold" >Comm.: </Text>₹{item?.vendorCommission || '0'}</Text>
+                      </View>
                     </View>
                   </View>
+                  <TouchableOpacity onPress={() => { if (!item?.savedAddresses?.vendorLocation?.latitude || !item?.savedAddresses?.vendorLocation?.longitude) { return } Linking.openURL(`https://www.google.com/maps/place/${item?.savedAddresses?.vendorLocation?.latitude}+${item?.savedAddresses?.vendorLocation?.longitude}/`) }} className="p-[10px] border-y-[5px] border-primary rounded-[10px] gap-[2px]" >
+                    <Text>📍{item?.savedAddresses?.vendorBusinessPlotNumberOrShopNumber}, {item?.savedAddresses?.vendorBusinessComplexNameOrBuildingName}, {item?.savedAddresses?.vendorBusinessLandmark}, {item?.savedAddresses?.vendorBusinessRoadNameOrStreetName}, {item?.savedAddresses?.vendorBusinessVillageNameOrTownName}, {item?.savedAddresses?.vendorBusinessCity}, {item?.savedAddresses?.vendorBusinessState} - {item?.savedAddresses?.vendorBusinessPincode}</Text>
+                    <Text><Text className="font-bold" >Long:</Text> {item?.savedAddresses?.vendorLocation?.longitude}, <Text className="font-bold" >Lati:</Text> {item?.savedAddresses?.vendorLocation?.latitude}</Text>
+                  </TouchableOpacity>
                 </View>
-                <TouchableOpacity onPress={() => { if (!item?.savedAddresses?.vendorLocation?.latitude || !item?.savedAddresses?.vendorLocation?.longitude) { return } Linking.openURL(`https://www.google.com/maps/place/${item?.savedAddresses?.vendorLocation?.latitude}+${item?.savedAddresses?.vendorLocation?.longitude}/`) }} className="p-[10px] border-y-[5px] border-primary rounded-[10px] gap-[2px]" >
-                  <Text>📍{item?.savedAddresses?.vendorBusinessPlotNumberOrShopNumber}, {item?.savedAddresses?.vendorBusinessComplexNameOrBuildingName}, {item?.savedAddresses?.vendorBusinessLandmark}, {item?.savedAddresses?.vendorBusinessRoadNameOrStreetName}, {item?.savedAddresses?.vendorBusinessVillageNameOrTownName}, {item?.savedAddresses?.vendorBusinessCity}, {item?.savedAddresses?.vendorBusinessState} - {item?.savedAddresses?.vendorBusinessPincode}</Text>
-                  <Text><Text className="font-bold" >Long:</Text> {item?.savedAddresses?.vendorLocation?.longitude}, <Text className="font-bold" >Lati:</Text> {item?.savedAddresses?.vendorLocation?.latitude}</Text>
-                </TouchableOpacity>
-              </View>
-            )}
-            ListEmptyComponent={<Text>Loading vendors...</Text>}
-          />
+              )}
+              ListEmptyComponent={<Text>No vendors found, trying to load more...</Text>}
+            />
+          </>
         )}
+
         {activeSection === Section.CUSTOMERS && (
-          <FlatList
-            data={allCustomersList.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))}
-            renderItem={({ item, index }) => {
-              return (
-                <TouchableOpacity onPress={() => Linking.openURL(`https://customers.unoshops.com/Login?customerMobileNumberFromAdmin=${item?.customerMobileNumber}&customerPasswordFromAdmin=${item?.customerPassword}`)} className='border border-y-[3px] border-x border-primary rounded-[5px] p-[5px] mb-[5px] gap-[5px] bg-blue-100' >
-                  <Text className="text-[10px] h-[20px] w-[20px] rounded-tl-[3px] rounded-br-[5px] bg-primary text-white text-center leading-none absolute top-[0px] left-[0px] z-50 flex items-center justify-center" >{allCustomersList.length - index}</Text>
-                  <Text className='absolute top-[5px] right-[5px]' >{item?.timestamp?.toDate().toLocaleString() || 'No time...'}</Text>
-                  <TouchableOpacity onPress={() => Linking.openURL(`tel:${item?.customerMobileNumber}`)} ><Text className='ml-[40px] text-primary' >{item?.customerMobileNumber || 'No number...'}</Text></TouchableOpacity>
-                  <Text className='ml-[40px]' ><Text className='font-bold' >Password: </Text>{item?.customerPassword || 'No Password...'}</Text>
-                  <Text className='ml-[40px]' >{item?.customerName || 'No name...'}</Text>
-                  <FlatList
-                    data={item?.savedAddresses || []}
-                    horizontal
-                    renderItem={({ item }) => {
-                      return (
-                        <TouchableOpacity onPress={() => { if (!item?.customerLocation?.latitude || !item?.customerLocation?.longitude) { return } Linking.openURL(`https://www.google.com/maps/place/${item?.customerLocation?.latitude}+${item?.customerLocation?.longitude}/`) }} className="p-[10px] border border-[#ccc] rounded-[10px] gap-[2px] mr-[5px] w-[300px]" >
-                          <Text>📍{item?.customerPlotNumber}, {item?.customerComplexNameOrBuildingName}, {item?.customerLandmark}, {item?.customerRoadNameOrStreetName}, {item?.customerVillageNameOrTownName}, {item?.customerCity}, {item?.customerState} - {item?.customerPincode}</Text>
-                          <Text><Text className="font-bold" >Long:</Text> {item?.customerLocation?.longitude}, <Text className="font-bold" >Lati:</Text> {item?.customerLocation?.latitude}</Text>
-                        </TouchableOpacity>
-                      )
-                    }}
-                  />
-                </TouchableOpacity>
-              )
-            }}
-          />
+          <>
+            <View className="mb-[5px] w-full">
+              <TextInput
+                className="border border-[#ccc] rounded-[5px] p-[10px] text-black"
+                placeholder="Search vendors..."
+                value={customersSearchQuery}
+                onChangeText={setCustomersSearchQuery}
+              />
+            </View>
+            <FlatList
+              data={allCustomersList
+                .filter(customer => {
+                  const q = customersSearchQuery?.trim().toLowerCase();
+                  if (!q) return true;
+                  return (
+                    customer?.customerName?.toLowerCase()?.includes(q) ||
+                    customer?.customerMobileNumber?.toLowerCase()?.includes(q) ||
+                    customer?.customerPassword?.toLowerCase()?.includes(q) ||
+                    (Array.isArray(customer?.savedAddresses) &&
+                      customer.savedAddresses.some(addr =>
+                        Object.values(addr || {}).some(
+                          val => typeof val === 'string' && val.toLowerCase().includes(q)
+                        )
+                      ))
+                  );
+                })
+                .sort((a, b) => {
+                  const dateA = a.timestamp?.toDate?.();
+                  const dateB = b.timestamp?.toDate?.();
+                  const timeA = dateA ? dateA.getTime() : 0;
+                  const timeB = dateB ? dateB.getTime() : 0;
+                  return timeB - timeA;
+                })}
+
+              renderItem={({ item, index }) => {
+                return (
+                  <TouchableOpacity onPress={() => Linking.openURL(`https://customers.unoshops.com/Login?customerMobileNumberFromAdmin=${item?.customerMobileNumber}&customerPasswordFromAdmin=${item?.customerPassword}`)} className='border border-y-[3px] border-x border-primary rounded-[5px] p-[5px] mb-[5px] gap-[5px] bg-blue-100' >
+                    <Text className="text-[10px] h-[20px] w-[20px] rounded-tl-[3px] rounded-br-[5px] bg-primary text-white text-center leading-none absolute top-[0px] left-[0px] z-50 flex items-center justify-center" >{allCustomersList.length - index}</Text>
+                    <Text className='absolute top-[5px] right-[5px]' >{item?.timestamp?.toDate().toLocaleString() || 'No time...'}</Text>
+                    <TouchableOpacity onPress={() => Linking.openURL(`tel:${item?.customerMobileNumber}`)} ><Text className='ml-[40px] text-primary' >{item?.customerMobileNumber || 'No number...'}</Text></TouchableOpacity>
+                    <Text className='ml-[40px]' ><Text className='font-bold' >Password: </Text>{item?.customerPassword || 'No Password...'}</Text>
+                    <Text className='ml-[40px]' >{item?.customerName || 'No name...'}</Text>
+                    <FlatList
+                      data={item?.savedAddresses || []}
+                      horizontal
+                      renderItem={({ item }) => {
+                        return (
+                          <TouchableOpacity onPress={() => { if (!item?.customerLocation?.latitude || !item?.customerLocation?.longitude) { return } Linking.openURL(`https://www.google.com/maps/place/${item?.customerLocation?.latitude}+${item?.customerLocation?.longitude}/`) }} className="p-[10px] border border-[#ccc] rounded-[10px] gap-[2px] mr-[5px] w-[300px]" >
+                            <Text>📍{item?.customerPlotNumber}, {item?.customerComplexNameOrBuildingName}, {item?.customerLandmark}, {item?.customerRoadNameOrStreetName}, {item?.customerVillageNameOrTownName}, {item?.customerCity}, {item?.customerState} - {item?.customerPincode}</Text>
+                            <Text><Text className="font-bold" >Long:</Text> {item?.customerLocation?.longitude}, <Text className="font-bold" >Lati:</Text> {item?.customerLocation?.latitude}</Text>
+                          </TouchableOpacity>
+                        )
+                      }}
+                    />
+                  </TouchableOpacity>
+                )
+              }}
+            />
+          </>
         )}
+
         {activeSection === Section.RECHARGE && (
           <View className='flex-1 gap-[10px]' >
             <Text className='text-center font-bold text-[25px]' >Add Recharge</Text>
             <TextInputComponent value={vendorMobileNumberForRecharge} onChangeText={setVendorMobileNumberForRecharge} maxLength={10} keyboardType={'numeric'} placeholder="Vendor Mobile Number" />
+            {vendorMobileNumberForRecharge?.length > 0 && allVendorsList.filter(vendor => vendor?.vendorMobileNumber?.toLowerCase()?.includes(vendorMobileNumberForRecharge.toLowerCase())).length > 0 && (
+              <ScrollView
+                style={{ maxHeight: 150 }}
+                keyboardShouldPersistTaps="handled"
+                className="border border-gray-300 rounded-[5px] bg-white"
+              >
+                {allVendorsList
+                  .filter(vendor =>
+                    vendor?.vendorMobileNumber
+                      ?.toLowerCase()
+                      ?.includes(vendorMobileNumberForRecharge.toLowerCase())
+                  )
+                  // .slice(0, 5) // show max 5 suggestions
+                  .map(vendor => (
+                    <TouchableOpacity
+                      key={vendor.id}
+                      onPress={() => setVendorMobileNumberForRecharge(vendor.vendorMobileNumber)}
+                      className="p-[10px] border-b border-gray-200"
+                    >
+                      <Text className="font-bold text-primary">{vendor.vendorMobileNumber}</Text>
+                      <Text className="text-gray-600">{vendor.vendorName}</Text>
+                      <Text className="text-gray-500 text-xs">{vendor.businessName}</Text>
+                    </TouchableOpacity>
+                  ))}
+              </ScrollView>
+            )}
             <View className='border border-gray-300 rounded-[10px]'>
               <Picker
                 selectedValue={selectedPlanType}
@@ -1030,6 +1360,7 @@ export default function Index() {
             <TouchableOpacity onPress={addRecharge} className='w-full bg-primary p-[10px] rounded-[5px]' ><Text className='text-white text-center text-lg' >Add</Text></TouchableOpacity>
           </View>
         )}
+
         {activeSection === Section.CATEGORY && (
           <View className='flex-1'>
             <TouchableOpacity
@@ -1126,8 +1457,132 @@ export default function Index() {
             />
           </View>
         )}
+
         {activeSection === Section.REGISTER && <Text>Register Vendor Section</Text>}
+
+        {activeSection === Section.ASSETS && (
+          <View className="flex-1">
+            {/* Upload new */}
+            <View className="bg-gray-100 p-4 rounded-lg mb-4">
+              <TouchableOpacity
+                onPress={uploadMedia}
+                className="bg-green-600 py-5 rounded-lg"
+              >
+                <Text className="text-white text-center font-bold text-lg">
+                  Upload Image or Video
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {isLoadingAssets ? (
+              <Text className="text-center">Loading assets...</Text>
+            ) : (
+              <FlatList
+                data={assetsList}
+                keyExtractor={item => item.fullPath}
+                renderItem={({ item }) => {
+                  const isVideo = item.name.match(/\.(mp4|mov|avi|webm|mkv|3gp)$/i);
+                  const isImage = item.name.match(/\.(jpg|jpeg|png|gif|webp)$/i);
+
+                  return (
+                    <View className="bg-gray-50 p-4 rounded-lg mb-3 border border-gray-300">
+                      <View className="flex-row items-center justify-between mb-2">
+                        {editingFile === item.fullPath ? (
+                          <TextInput
+                            className="border border-primary rounded px-2 flex-1 mr-2"
+                            value={newFileName}
+                            onChangeText={setNewFileName}
+                            autoFocus
+                          />
+                        ) : (
+                          <Text className="font-bold flex-1">{item.name}</Text>
+                        )}
+
+                        <View className="flex-row gap-2">
+                          {editingFile === item.fullPath ? (
+                            <>
+                              <TouchableOpacity
+                                onPress={() => renameAsset(item.fullPath, item.name, newFileName)}
+                                className="bg-green-600 px-3 py-1 rounded"
+                              >
+                                <Text className="text-white text-xs">Save</Text>
+                              </TouchableOpacity>
+                              <TouchableOpacity
+                                onPress={() => { setEditingFile(null); setNewFileName(''); }}
+                                className="bg-gray-500 px-3 py-1 rounded"
+                              >
+                                <Text className="text-white text-xs">Cancel</Text>
+                              </TouchableOpacity>
+                            </>
+                          ) : (
+                            <>
+                              <TouchableOpacity
+                                onPress={() => {
+                                  setEditingFile(item.fullPath);
+                                  setNewFileName(item.name.split('.').slice(0, -1).join('.'));
+                                }}
+                                className="bg-blue-600 px-3 py-1 rounded"
+                              >
+                                <Text className="text-white text-xs">Rename</Text>
+                              </TouchableOpacity>
+                              <TouchableOpacity
+                                onPress={() => deleteAsset(item.fullPath, item.name)}
+                                className="bg-red-600 px-3 py-1 rounded"
+                              >
+                                <Text className="text-white text-xs">Delete</Text>
+                              </TouchableOpacity>
+                            </>
+                          )}
+                        </View>
+                      </View>
+
+                      {/* Pretty Link Copy */}
+                      <TouchableOpacity
+                        onPress={() => {
+                          const pretty = `https://dl.unoshops.com/u/${item.name}`;
+                          navigator.clipboard.writeText(pretty);
+                          alert('Copied!', pretty);
+                        }}
+                        className="bg-primary py-2 rounded mt-2"
+                      >
+                        <Text className="text-white text-center text-xs">Copy Pretty Link</Text>
+                      </TouchableOpacity>
+
+                      {/* Image or Video Preview */}
+                      {isImage && (
+                        <Image
+                          source={{ uri: item.url }}
+                          className="w-full h-64 rounded mt-3"
+                          resizeMode="contain"
+                        />
+                      )}
+
+                      {isVideo && (
+                        <TouchableOpacity
+                          onPress={() => Linking.openURL(item.url)}
+                          className="mt-3 rounded-xl overflow-hidden bg-black relative"
+                        >
+                          <Image
+                            source={{ uri: item.url + '?alt=media' }}
+                            className="w-full h-64"
+                            resizeMode="cover"
+                          />
+                          <View className="absolute inset-0 bg-black/50 justify-center items-center">
+                            <Text className="text-white text-6xl">Play</Text>
+                          </View>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  );
+                }}
+                ListEmptyComponent={<Text className="text-center text-gray-500">No files yet</Text>}
+              />
+            )}
+          </View>
+        )}
+        
       </View>
+
       {isAddNewCategoryModalVisible && (
         <Modal animationType="slide" transparent={true} visible={isAddNewCategoryModalVisible}>
           <View className='flex-1 p-[10px] bg-[#00000060] items-center justify-center'>
