@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { FlatList, Image, ScrollView, Text, TouchableOpacity, View, TextInput, Alert, Linking, Modal, Platform } from "react-native";
+import { FlatList, Image, ScrollView, Text, TouchableOpacity, View, TextInput, Alert, Linking, Modal, Platform, ActivityIndicator } from "react-native";
 import { collection, doc, getDocs, serverTimestamp, setDoc, updateDoc, getDoc, deleteDoc } from "firebase/firestore"
 import db from '@/firebase'
 import Loader from "./components/Loader";
@@ -19,6 +19,7 @@ import { launchCamera, launchImageLibrary } from 'react-native-image-picker';
 import { LegendList } from "@legendapp/list"
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
+import { Video } from 'expo-av'
 
 // Define an enum or constants for better readability
 const Section = {
@@ -1461,21 +1462,22 @@ export default function Index() {
         {activeSection === Section.REGISTER && <Text>Register Vendor Section</Text>}
 
         {activeSection === Section.ASSETS && (
-          <View className="flex-1">
+          <View className="flex-1 gap-[3px]">
             {/* Upload new */}
-            <View className="bg-gray-100 p-4 rounded-lg mb-4">
-              <TouchableOpacity
-                onPress={uploadMedia}
-                className="bg-green-600 py-5 rounded-lg"
-              >
-                <Text className="text-white text-center font-bold text-lg">
-                  Upload Image or Video
-                </Text>
-              </TouchableOpacity>
-            </View>
+            <TouchableOpacity
+              onPress={uploadMedia}
+              className="bg-primaryGreen p-[10px] rounded-[5px]"
+            >
+              <Text className="text-white text-center font-bold text-[16px]">
+                Upload Image or Video
+              </Text>
+            </TouchableOpacity>
 
             {isLoadingAssets ? (
-              <Text className="text-center">Loading assets...</Text>
+              <>
+                <Text className="text-center">Loading assets...</Text>
+                <ActivityIndicator />
+              </>
             ) : (
               <FlatList
                 data={assetsList}
@@ -1485,55 +1487,18 @@ export default function Index() {
                   const isImage = item.name.match(/\.(jpg|jpeg|png|gif|webp)$/i);
 
                   return (
-                    <View className="bg-gray-50 p-4 rounded-lg mb-3 border border-gray-300">
-                      <View className="flex-row items-center justify-between mb-2">
+                    <View className="bg-gray-50 py-[5px] px-[10px] rounded-[5px] mb-[5px] border-y-[3px] border-primary gap-[3px]">
+                      <View className="flex-row items-center justify-between">
                         {editingFile === item.fullPath ? (
                           <TextInput
-                            className="border border-primary rounded px-2 flex-1 mr-2"
+                            className="border border-primary rounded-[5px] p-[10px] flex-1"
                             value={newFileName}
                             onChangeText={setNewFileName}
                             autoFocus
                           />
                         ) : (
-                          <Text className="font-bold flex-1">{item.name}</Text>
+                          <Text className="font-bold flex-1 text-center">{item.name}</Text>
                         )}
-
-                        <View className="flex-row gap-2">
-                          {editingFile === item.fullPath ? (
-                            <>
-                              <TouchableOpacity
-                                onPress={() => renameAsset(item.fullPath, item.name, newFileName)}
-                                className="bg-green-600 px-3 py-1 rounded"
-                              >
-                                <Text className="text-white text-xs">Save</Text>
-                              </TouchableOpacity>
-                              <TouchableOpacity
-                                onPress={() => { setEditingFile(null); setNewFileName(''); }}
-                                className="bg-gray-500 px-3 py-1 rounded"
-                              >
-                                <Text className="text-white text-xs">Cancel</Text>
-                              </TouchableOpacity>
-                            </>
-                          ) : (
-                            <>
-                              <TouchableOpacity
-                                onPress={() => {
-                                  setEditingFile(item.fullPath);
-                                  setNewFileName(item.name.split('.').slice(0, -1).join('.'));
-                                }}
-                                className="bg-blue-600 px-3 py-1 rounded"
-                              >
-                                <Text className="text-white text-xs">Rename</Text>
-                              </TouchableOpacity>
-                              <TouchableOpacity
-                                onPress={() => deleteAsset(item.fullPath, item.name)}
-                                className="bg-red-600 px-3 py-1 rounded"
-                              >
-                                <Text className="text-white text-xs">Delete</Text>
-                              </TouchableOpacity>
-                            </>
-                          )}
-                        </View>
                       </View>
 
                       {/* Pretty Link Copy */}
@@ -1543,9 +1508,9 @@ export default function Index() {
                           navigator.clipboard.writeText(pretty);
                           alert('Copied!', pretty);
                         }}
-                        className="bg-primary py-2 rounded mt-2"
+                        className="bg-primary p-[10px] rounded-[5px]"
                       >
-                        <Text className="text-white text-center text-xs">Copy Pretty Link</Text>
+                        <Text className="text-white text-center text-xs">Copy Link</Text>
                       </TouchableOpacity>
 
                       {/* Image or Video Preview */}
@@ -1558,20 +1523,50 @@ export default function Index() {
                       )}
 
                       {isVideo && (
-                        <TouchableOpacity
-                          onPress={() => Linking.openURL(item.url)}
-                          className="mt-3 rounded-xl overflow-hidden bg-black relative"
-                        >
-                          <Image
-                            source={{ uri: item.url + '?alt=media' }}
-                            className="w-full h-64"
-                            resizeMode="cover"
-                          />
-                          <View className="absolute inset-0 bg-black/50 justify-center items-center">
-                            <Text className="text-white text-6xl">Play</Text>
-                          </View>
-                        </TouchableOpacity>
+                        <Video
+                          source={{ uri: item.url }}
+                          style={{ width: '100%', maxWidth: 500, height: 200, maxHeight: 300, borderRadius: 5 }}
+                          resizeMode="cover"
+                          useNativeControls
+                        />
                       )}
+
+                      <View className="flex-row gap-[10px]">
+                        {editingFile === item.fullPath ? (
+                          <>
+                            <TouchableOpacity
+                              onPress={() => renameAsset(item.fullPath, item.name, newFileName)}
+                              className="bg-primaryGreen flex-1 rounded p-[10px]"
+                            >
+                              <Text className="text-white text-center">Save</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                              onPress={() => { setEditingFile(null); setNewFileName(''); }}
+                              className="bg-primaryRed flex-1 rounded p-[10px]"
+                            >
+                              <Text className="text-white text-center">Cancel</Text>
+                            </TouchableOpacity>
+                          </>
+                        ) : (
+                          <>
+                            <TouchableOpacity
+                              onPress={() => {
+                                setEditingFile(item.fullPath);
+                                setNewFileName(item.name.split('.').slice(0, -1).join('.'));
+                              }}
+                              className="bg-blue-600 flex-1 rounded p-[10px]"
+                            >
+                              <Text className="text-white text-center">Rename</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                              onPress={() => deleteAsset(item.fullPath, item.name)}
+                              className="bg-red-600 flex-1 rounded p-[10px]"
+                            >
+                              <Text className="text-white text-center">Delete</Text>
+                            </TouchableOpacity>
+                          </>
+                        )}
+                      </View>
                     </View>
                   );
                 }}
@@ -1580,7 +1575,7 @@ export default function Index() {
             )}
           </View>
         )}
-        
+
       </View>
 
       {isAddNewCategoryModalVisible && (
